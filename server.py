@@ -26,7 +26,7 @@ from fastmcp import FastMCP
 import coros_api
 from coros_api import TOKEN_TTL_MS
 from cache.store import cache_status, init_db
-from cache.utils import fmt_local_time
+from cache.utils import LOCAL_TZ, fmt_local_time
 from cache.sync import (
     fetch_activities_cached,
     fetch_daily_records_cached,
@@ -254,7 +254,7 @@ async def get_daily_metrics(weeks: int = 4) -> dict:
         }
 
     weeks = max(1, min(weeks, 52))
-    end_dt = datetime.now()
+    end_dt = datetime.now(tz=LOCAL_TZ) if LOCAL_TZ is not None else datetime.now()
     start_dt = end_dt - timedelta(weeks=weeks)
     start_day = start_dt.strftime("%Y%m%d")
     end_day = end_dt.strftime("%Y%m%d")
@@ -310,7 +310,7 @@ async def get_sleep_data(weeks: int = 4) -> dict:
         return {"error": "Not authenticated. Set COROS_EMAIL and COROS_PASSWORD in .env or call authenticate_coros.", "records": []}
 
     weeks = max(1, min(weeks, 52))
-    end_dt = datetime.now()
+    end_dt = datetime.now(tz=LOCAL_TZ) if LOCAL_TZ is not None else datetime.now()
     start_dt = end_dt - timedelta(weeks=weeks)
     start_day = start_dt.strftime("%Y%m%d")
     end_day = end_dt.strftime("%Y%m%d")
@@ -426,7 +426,7 @@ async def list_workouts() -> dict:
     dict with keys: workouts (list), count
     Each workout contains: id, name, sport_type, sport_name,
     estimated_time_seconds, exercise_count, exercises (list of steps with
-    name, duration_seconds, power_low_w, power_high_w)
+    name, duration_seconds, intensity_low, intensity_high, sets)
     """
     auth = await _get_auth()
     if auth is None:
@@ -566,20 +566,21 @@ async def list_planned_activities(
 
     Returns
     -------
-    dict with keys: activities (list of raw scheduled items), count, date_range
+    dict with keys: schedule (stripped schedule dict with entities and programs
+    sub-lists), count (number of scheduled entities), date_range
     """
     auth = await _get_auth()
     if auth is None:
-        return {"error": "Not authenticated. Set COROS_EMAIL and COROS_PASSWORD in .env or call authenticate_coros.", "activities": []}
+        return {"error": "Not authenticated. Set COROS_EMAIL and COROS_PASSWORD in .env or call authenticate_coros.", "schedule": {}}
     try:
         items = await _run_with_auth(coros_api.fetch_schedule, auth, start_day, end_day)
         return {
-            "activities": items,
-            "count": len(items),
+            "schedule": items,
+            "count": len(items.get("entities", [])),
             "date_range": f"{start_day} – {end_day}",
         }
     except Exception as exc:
-        return {"error": str(exc), "activities": []}
+        return {"error": str(exc), "schedule": {}}
 
 
 # ---------------------------------------------------------------------------
@@ -774,7 +775,6 @@ async def sync_coros_data(start_day: str = "", end_day: str = "") -> dict:
     if auth is None:
         return {"error": "Not authenticated. Set COROS_EMAIL and COROS_PASSWORD or call authenticate_coros."}
 
-    from datetime import datetime, timedelta
     if not start_day:
         start_day = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
     if not end_day:

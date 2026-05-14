@@ -17,11 +17,11 @@ pip install -e .
 ## Running the Server
 
 ```bash
-# Run the MCP server directly:
-python server.py
+# Run via CLI entry point (recommended):
+coros-mcp serve
 
 # Or register with Claude Code:
-claude mcp add coros -- python /path/to/coros-mcp/server.py
+claude mcp add coros -- /path/to/coros-mcp/.venv/bin/coros-mcp serve
 ```
 
 ## CLI Commands
@@ -32,6 +32,8 @@ coros-mcp auth-web       # Web API only (no sleep data)
 coros-mcp auth-mobile    # Mobile API only (sleep data)
 coros-mcp auth-status    # Check token status
 coros-mcp auth-clear     # Remove stored tokens
+coros-mcp sync [--from YYYYMMDD] [--to YYYYMMDD]  # Backfill data to local cache
+coros-mcp cache-status   # Show local cache coverage
 ```
 
 ## Architecture
@@ -49,7 +51,9 @@ Priority chain for retrieval: `COROS_ACCESS_TOKEN` env var → system keyring �
 - **`server.py`**: FastMCP tool definitions. Each `@mcp.tool()` function validates auth, delegates to `coros_api`, and returns a dict. This is the only file that imports from `fastmcp`.
 - **`coros_api.py`**: All HTTP logic. Contains two sets of endpoints (Training Hub + mobile), the AES encryption for mobile auth, auto-refresh logic, and response parsers. The `fetch_daily_records()` function merges two endpoints: `/analyse/dayDetail/query` (long range, no VO2max) + `/analyse/query` (last 28 days, has VO2max/fitness fields).
 - **`models.py`**: Pydantic v2 models: `StoredAuth`, `DailyRecord`, `SleepRecord`/`SleepPhases`, `HRVRecord`, `ActivitySummary`.
-- **`cli.py`**: CLI entry point registered as `coros-mcp` script. Delegates to `coros_api.login()` / `login_mobile()`.
+- **`cli.py`**: CLI entry point registered as `coros-mcp` script. Delegates to `coros_api.login()` / `login_mobile()` and `cache.sync.sync_all()`.
+- **`cache/`**: SQLite-backed local data store. `store.py` — raw read/write; `sync.py` — smart fetch logic (resolve gaps, backfill, chunk), `_resolve_fetch_range()` decides what to hit the API for; `utils.py` — timezone helpers.
+- **`auth/`**: Token storage abstraction. Priority chain: env var → encrypted file → keyring. `encrypted_store.py` uses AES-256-GCM with a machine-bound key; `keyring_store.py` wraps the system keyring.
 
 ### API Response Pattern
 All Coros API responses return `result: "0000"` on success. Any other value indicates an error — check `message` field. Large time-series fields (`graphList`, `frequencyList`, `gpsLightDuration`) are stripped from activity detail responses to keep them manageable.

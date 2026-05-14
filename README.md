@@ -38,6 +38,8 @@ Ask your AI assistant questions like:
 | `remove_scheduled_workout` | Remove a scheduled workout from the calendar |
 | `create_strength_workout` | Create a structured strength workout with sets, reps, or timed exercises |
 | `list_exercises` | Browse the Coros exercise catalogue, especially for strength workouts |
+| `sync_coros_data` | Backfill all data into the local SQLite cache for a date range |
+| `get_cache_status` | Show coverage (record counts and date ranges) of the local cache |
 
 ---
 
@@ -258,7 +260,7 @@ List all saved structured workout programs.
 
 Returns: `workouts` (list), `count`
 
-Each workout includes: `id`, `name`, `sport_type`, `sport_name`, `estimated_time_seconds`, `exercise_count`, `exercises` (list of steps with `name`, `duration_seconds`, `power_low_w`, `power_high_w`)
+Each workout includes: `id`, `name`, `sport_type`, `sport_name`, `estimated_time_seconds`, `exercise_count`, `exercises` (list of steps with `name`, `duration_seconds`, `intensity_low`, `intensity_high`, `sets`)
 
 ### `create_workout`
 
@@ -271,11 +273,11 @@ Create a new structured workout. Workouts appear in the Coros app and can be syn
   "name": "Sweet Spot 90min",
   "sport_type": 2,
   "steps": [
-    {"name": "15:00 Warmup",     "duration_minutes": 15, "power_low_w": 148, "power_high_w": 192},
-    {"name": "20:00 Sweet Spot", "duration_minutes": 20, "power_low_w": 260, "power_high_w": 275},
-    {"name": "5:00 Rest",        "duration_minutes":  5, "power_low_w": 100, "power_high_w": 150},
-    {"name": "20:00 Sweet Spot", "duration_minutes": 20, "power_low_w": 260, "power_high_w": 275},
-    {"name": "30:00 Cooldown",   "duration_minutes": 30, "power_low_w": 100, "power_high_w": 192}
+    {"name": "15:00 Warmup",     "duration_minutes": 15, "intensity_low": 148, "intensity_high": 192},
+    {"name": "20:00 Sweet Spot", "duration_minutes": 20, "intensity_low": 260, "intensity_high": 275},
+    {"name": "5:00 Rest",        "duration_minutes":  5, "intensity_low": 100, "intensity_high": 150},
+    {"name": "20:00 Sweet Spot", "duration_minutes": 20, "intensity_low": 260, "intensity_high": 275},
+    {"name": "30:00 Cooldown",   "duration_minutes": 30, "intensity_low": 100, "intensity_high": 192}
   ]
 }
 ```
@@ -287,12 +289,12 @@ Create a new structured workout. Workouts appear in the Coros app and can be syn
   "name": "3×10min Sweet Spot",
   "sport_type": 2,
   "steps": [
-    {"name": "Warmup",    "duration_minutes": 10, "power_low_w": 150, "power_high_w": 200},
+    {"name": "Warmup",    "duration_minutes": 10, "intensity_low": 150, "intensity_high": 200},
     {"repeat": 3, "steps": [
-      {"name": "Sweet Spot", "duration_minutes": 10, "power_low_w": 265, "power_high_w": 285},
-      {"name": "Recovery",   "duration_minutes":  3, "power_low_w": 150, "power_high_w": 175}
+      {"name": "Sweet Spot", "duration_minutes": 10, "intensity_low": 265, "intensity_high": 285},
+      {"name": "Recovery",   "duration_minutes":  3, "intensity_low": 150, "intensity_high": 175}
     ]},
-    {"name": "Cooldown",  "duration_minutes": 11, "power_low_w": 150, "power_high_w": 200}
+    {"name": "Cooldown",  "duration_minutes": 11, "intensity_low": 150, "intensity_high": 200}
   ]
 }
 ```
@@ -321,7 +323,7 @@ List planned activities from the Coros training calendar.
 { "start_day": "20260309", "end_day": "20260316" }
 ```
 
-Returns: `activities` (list), `count`, `date_range`
+Returns: `schedule` (dict with `entities` and `programs` sub-lists), `count` (number of scheduled entities), `date_range`
 
 ### `schedule_workout`
 
@@ -364,7 +366,8 @@ Create a structured strength workout with repeated sets. Exercises must come fro
       "overview": "sid_strength_squats",
       "target_type": 3,
       "target_value": 12,
-      "rest_seconds": 45
+      "rest_seconds": 45,
+      "sets": 3
     },
     {
       "origin_id": "130",
@@ -380,6 +383,10 @@ Create a structured strength workout with repeated sets. Exercises must come fro
 
 `target_type`: `2` = time in seconds, `3` = reps
 
+`sets` (per exercise, optional): consecutive sets of that exercise before moving on. Use this instead of duplicating the exercise entry. Defaults to 1.
+
+`sets` (top-level): full-circuit repetitions — repeats the entire exercise list. Defaults to 1.
+
 Returns: `workout_id`, `name`, `sets`, `exercise_count`
 
 ### `list_exercises`
@@ -391,6 +398,32 @@ List the Coros exercise catalogue for a sport type. Default `sport_type=4` retur
 ```
 
 Returns: `exercises` (list), `count`, `sport_type`
+
+### `sync_coros_data`
+
+Backfill all data into the local SQLite cache for a date range. After the first full sync, `get_daily_metrics`, `get_sleep_data`, and `list_activities` serve historical data from cache and only fetch the incremental tail from the API.
+
+```json
+{ "start_day": "20230101", "end_day": "20260514" }
+```
+
+Both parameters are optional and default to two years ago / today respectively. For large ranges (> 6 months) prefer the CLI:
+
+```bash
+coros-mcp sync --from 20230101
+```
+
+Returns: `daily` (records synced), `sleep` (records synced), `activities` (records synced), `errors` (list), `cache` (coverage summary)
+
+### `get_cache_status`
+
+Show what data is currently stored in the local SQLite cache.
+
+```json
+{}
+```
+
+Returns per data type: `count`, `from` (earliest date), `to` (latest date). Also includes `db_path`.
 
 ---
 
@@ -408,8 +441,10 @@ coros-mcp/
 ├── server.py          # MCP server with tool definitions
 ├── coros_api.py       # Coros API client (auth, requests, parsers)
 ├── models.py          # Pydantic data models
-├── cli.py             # CLI entry point (serve, auth, auth-mobile, auth-status, auth-clear)
+├── cli.py             # CLI entry point (serve, auth, sync, cache-status, …)
 ├── auth/              # Token storage (keyring + encrypted file fallback)
+├── cache/             # SQLite cache layer (store, sync, utils)
+├── tests/             # pytest test suite
 ├── pyproject.toml     # Project metadata & dependencies
 └── docs/
     └── mobile-token.md  # Mobile API token background (legacy reference)

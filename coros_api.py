@@ -274,6 +274,8 @@ def get_stored_auth() -> Optional[StoredAuth]:
     access_token = os.environ.get("COROS_ACCESS_TOKEN")
     if access_token:
         region = os.environ.get("COROS_REGION", "eu")
+        # Timestamp is set to now so the TTL check always passes — env-var
+        # tokens are assumed to be externally managed and always valid.
         return StoredAuth(
             access_token=access_token,
             user_id="env",
@@ -446,11 +448,11 @@ async def fetch_daily_records(
             date = str(item.get("happenDay", ""))
             if date in records_by_date:
                 rec = records_by_date[date]
-                rec.vo2max = item.get("vo2max") or rec.vo2max
-                rec.lthr = item.get("lthr") or rec.lthr
-                rec.ltsp = item.get("ltsp") or rec.ltsp
-                rec.stamina_level = item.get("staminaLevel") or rec.stamina_level
-                rec.stamina_level_7d = item.get("staminaLevel7d") or rec.stamina_level_7d
+                if (v := item.get("vo2max")) is not None: rec.vo2max = v
+                if (v := item.get("lthr")) is not None: rec.lthr = v
+                if (v := item.get("ltsp")) is not None: rec.ltsp = v
+                if (v := item.get("staminaLevel")) is not None: rec.stamina_level = v
+                if (v := item.get("staminaLevel7d")) is not None: rec.stamina_level_7d = v
 
     return sorted(records_by_date.values(), key=lambda r: r.date)
 
@@ -580,8 +582,8 @@ def _parse_workout(item: dict) -> dict:
         exercises.append({
             "name": ex.get("name"),
             "duration_seconds": ex.get("targetValue"),
-            "power_low_w": ex.get("intensityValue"),
-            "power_high_w": ex.get("intensityValueExtend"),
+            "intensity_low": ex.get("intensityValue"),
+            "intensity_high": ex.get("intensityValueExtend"),
             "sets": ex.get("sets", 1),
         })
     sport = item.get("sportType")
@@ -627,8 +629,8 @@ async def create_workout(
     Plain step:
       - name: str — step label (e.g. "10:00 Einfahren")
       - duration_minutes: float — step duration in minutes
-      - power_low_w: int — lower power target in watts
-      - power_high_w: int — upper power target in watts (0 = open-ended)
+      - intensity_low: int — lower intensity target (watts, BPM, etc. per intensity_type)
+      - intensity_high: int — upper intensity target (0 = open-ended)
 
     Repeat group:
       - repeat: int — number of repetitions
@@ -882,6 +884,7 @@ async def create_strength_workout(
 
     Returns the new workout ID.
     """
+    sets = max(1, sets)
     built = []
     total_duration = 0
     for i, ex in enumerate(exercises):

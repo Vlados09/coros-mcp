@@ -12,6 +12,7 @@ Covers the gaps not exercised by the existing test suite:
 import importlib
 import os
 import sys
+import unittest
 from datetime import timedelta, timezone
 
 import pytest
@@ -89,7 +90,7 @@ class TestParseActivityZeroValues:
 # 2. Bridge warning — logged when fetch range is extended for contiguity
 # ---------------------------------------------------------------------------
 
-class TestBridgeWarning:
+class TestBridgeWarning(unittest.TestCase):
 
     def _resolve(self, min_cached, max_cached, start_day, end_day, cutoff="20260412"):
         from cache.sync import _resolve_fetch_range
@@ -112,10 +113,6 @@ class TestBridgeWarning:
         with patch("cache.sync.logger") as mock_logger:
             self._resolve("20260301", "20260410", "20260305", "20260420")
         mock_logger.warning.assert_not_called()
-
-    # unittest.TestCase.assertLogs is mixed in via the class; use it directly.
-    from unittest import TestCase
-    assertLogs = TestCase.assertLogs
 
 
 # ---------------------------------------------------------------------------
