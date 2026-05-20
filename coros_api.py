@@ -912,12 +912,24 @@ async def create_strength_workout(
         rest = ex.get("rest_seconds", 60)
         ex_sets = max(1, int(ex.get("sets", 1)))
         weight_kg = float(ex.get("weight_kg", 0) or 0)
+        if weight_kg < 0:
+            raise ValueError(
+                f"weight_kg must be non-negative, got {weight_kg}"
+            )
         # Coros app mirrors weight into intensityPercent as kg × 1_000_000
         # (verified by inspecting a workout edited in the official client).
         # The *Extend fields are part of the schema but unused by the app's UI,
         # so we always leave them at 0.
-        intensity_value = int(weight_kg * 1000)
-        intensity_percent = int(weight_kg * 1_000_000)
+        # round() (not int()) — int truncates toward zero and some float
+        # multiplications land just under the integer (e.g. 27.9 * 1000 →
+        # 27899.999...) which would lose the last kg.
+        # NOTE: intensityDisplayUnit is hardcoded to "6" (below) — verified
+        # to display correctly on a kg-configured account. Behaviour on an
+        # account configured for lbs has NOT been tested; the value may be
+        # interpreted as lbs and display the wrong number. Tracked as a
+        # follow-up.
+        intensity_value = round(weight_kg * 1000)
+        intensity_percent = round(weight_kg * 1_000_000)
         total_duration += ((target_value if ex["target_type"] == 2 else 0) + rest) * ex_sets
         built.append({
             "access": 0,
