@@ -878,6 +878,10 @@ def _strip_schedule(data: dict) -> dict:
     return out
 
 
+# 1 lb = 0.45359237 kg (exact, NIST).
+_LB_TO_KG = 0.45359237
+
+
 async def create_strength_workout(
     auth: StoredAuth,
     name: str,
@@ -893,56 +897,112 @@ async def create_strength_workout(
       - overview: str   — sid_ key (e.g. "sid_strength_squats")
       - target_type: int — 2=time (seconds), 3=reps
       - target_value: int — seconds or reps
-      - rest_seconds: int — rest after this exercise
-      - weight_kg: float (optional) — prescribed weight in kg
-        (0 or omitted = no weight set, suitable for bodyweight exercises).
-        For DB exercises, by convention this is the per-hand weight.
-        Note: the Coros app does not display weight ranges, only single
-        values — so a range field is intentionally not supported.
+      - rest_seconds: int — rest after this exercise. 0 → "Skip rests".
+      - weight_kg: float (optional) — prescribed weight in kg.
+      - weight_lbs: float (optional) — prescribed weight in pounds.
+        Mutually exclusive with weight_kg; pick one.
+        Omitting BOTH renders as "Bodyweight" in the app.
+        Explicit weight_kg=0 renders as "0.00 kg" — different from omitting.
+        For dumbbell exercises, by convention this is the per-hand weight.
+        The Coros app does not render ranges — single values only.
 
     sets: number of circuit repetitions.
 
     Returns the new workout ID.
     """
     sets = max(1, sets)
+
+    # Fetch the strength catalog so we can copy per-exercise muscle / equipment /
+    # body-part metadata into each workout exercise. Without these, the Coros app
+    # cannot render the Training Machines / Training Parts sections, and the
+    # "Bodyweight" label on un-weighted exercises doesn't render either.
+    catalog = await fetch_exercises(auth, 4)
+    by_id = {str(e.get("id")): e for e in catalog}
+
     built = []
     total_duration = 0
     for i, ex in enumerate(exercises):
         target_value = ex["target_value"]
-        rest = ex.get("rest_seconds", 60)
+
+        # Rest encoding: rest_seconds=0 → restType=3 ("Skip rests"),
+        # rest_seconds>0 → restType=1 ("Rest MM:SS"). Verified against
+        # app-created workouts.
+        rest = int(ex.get("rest_seconds", 60))
+        if rest <= 0:
+            rest_type, rest_value = 3, 0
+        else:
+            rest_type, rest_value = 1, rest
+
         ex_sets = max(1, int(ex.get("sets", 1)))
-        weight_kg = float(ex.get("weight_kg", 0) or 0)
-        if weight_kg < 0:
+
+        # Weight encoding (reverse-engineered 2026-05-20 from iOS-app payloads):
+        #   Bodyweight (both weight_kg and weight_lbs omitted):
+        #       intensityValue   = ""   (empty string, NOT 0)
+        #       intensityCustom  = 1
+        #       Renders as "Bodyweight".
+        #   Weighted kg:
+        #       intensityValue   = round(kg × 1000), intensityPercent = 0
+        #       intensityDisplayUnit = "6", intensityCustom = 0
+        #   Weighted lbs:
+        #       intensityValue   = round(lbs × 0.45359237 × 1000)
+        #       intensityPercent = round(lbs × 1_000_000)
+        #       intensityDisplayUnit = "7", intensityCustom = 0
+        #   weight_kg=0 explicitly → renders "0.00 kg" (intensityValue=0,
+        #   intensityCustom=0). Distinct from bodyweight.
+        #
+        # round() (not int()) because float multiplications can land just
+        # below the integer boundary (e.g. 27.9 * 1000 → 27899.999...).
+        weight_kg = ex.get("weight_kg")
+        weight_lbs = ex.get("weight_lbs")
+        if weight_kg is not None and weight_lbs is not None:
             raise ValueError(
-                f"weight_kg must be non-negative, got {weight_kg}"
+                "exercise specifies both weight_kg and weight_lbs — pick one"
             )
-        # intensityValue is the canonical store: always kg × 1000.
-        # The Coros app converts kg → lbs at display time using the user's
-        # account unit setting, so passing kg here is correct for any user.
-        # round() (not int()) — int truncates toward zero and some float
-        # multiplications land just under the integer (e.g. 27.9 * 1000 →
-        # 27899.999...) which would lose the last kg.
-        # intensityPercent is left at 0: when the Coros client itself creates
-        # a workout it stores the *display* value (kg or lbs) × 1_000_000 in
-        # intensityPercent. Mirroring kg × 1_000_000 from here would therefore
-        # break for accounts configured in lbs. Verified empirically that
-        # intensityPercent=0 displays the correct unit-converted weight on
-        # both kg and lbs accounts — intensityValue alone is sufficient.
-        # The *Extend fields are part of the schema for range-style
-        # prescriptions but the Coros app does not render ranges, so they
-        # are always left at 0.
-        intensity_value = round(weight_kg * 1000)
+        if weight_lbs is not None:
+            weight_lbs = float(weight_lbs)
+            if weight_lbs < 0:
+                raise ValueError(
+                    f"weight_lbs must be non-negative, got {weight_lbs}"
+                )
+            intensity_value: int | str = round(weight_lbs * _LB_TO_KG * 1000)
+            intensity_percent = round(weight_lbs * 1_000_000)
+            display_unit = "7"
+            intensity_custom = 0
+        elif weight_kg is not None:
+            weight_kg = float(weight_kg)
+            if weight_kg < 0:
+                raise ValueError(
+                    f"weight_kg must be non-negative, got {weight_kg}"
+                )
+            intensity_value = round(weight_kg * 1000)
+            intensity_percent = 0
+            display_unit = "6"
+            intensity_custom = 0
+        else:
+            # Bodyweight — empty string is the iOS-app marker.
+            intensity_value = ""
+            intensity_percent = 0
+            display_unit = "6"
+            intensity_custom = 1
+
         total_duration += ((target_value if ex["target_type"] == 2 else 0) + rest) * ex_sets
+
+        cat = by_id.get(str(ex["origin_id"]), {})
+        muscle = cat.get("muscle") or []
+        muscle_relevance = cat.get("muscleRelevance") or []
+        part = cat.get("part") or []
+        equipment = cat.get("equipment") or []
+
         built.append({
-            "access": 0,
-            "createTimestamp": 0,
-            "defaultOrder": i,
+            "exerciseKind": 0,
             "exerciseType": 2,
-            "id": i + 1,
-            "intensityCustom": 0,
-            "intensityDisplayUnit": "6",
+            "gradeSystem": 0,
+            "groupId": "0",
+            "hrType": 0,
+            "intensityCustom": intensity_custom,
+            "intensityDisplayUnit": display_unit,
             "intensityMultiplier": 0,
-            "intensityPercent": 0,
+            "intensityPercent": intensity_percent,
             "intensityPercentExtend": 0,
             "intensityType": 1,
             "intensityValue": intensity_value,
@@ -950,72 +1010,48 @@ async def create_strength_workout(
             "isDefaultAdd": 0,
             "isGroup": False,
             "isIntensityPercent": False,
-            "hrType": 0,
+            "muscle": muscle,
+            "muscleRelevance": muscle_relevance,
             "name": ex.get("name", ""),
+            "onsightGradeOffset": 0,
             "originId": ex["origin_id"],
             "overview": ex.get("overview", "sid_strength_training"),
-            "part": [0],
-            "groupId": "",
-            "restType": 1,
-            "restValue": rest,
+            "part": part,
+            "equipment": equipment,
+            "packageTime": 0,
+            "restType": rest_type,
+            "restValue": rest_value,
             "sets": ex_sets,
-            "sortNo": i,
-            "sourceUrl": "",
+            "sourceId": "0",
             "sportType": 4,
-            "status": 1,
+            "subType": 0,
             "targetDisplayUnit": 0,
             "targetType": ex["target_type"],
             "targetValue": target_value,
-            "userId": 0,
-            "videoInfos": [],
-            "videoUrl": "",
         })
 
     total_duration *= sets
     payload = {
-        "access": 1,
-        "authorId": "0",
-        "createTimestamp": 0,
-        "distance": "0",
         "duration": total_duration,
-        "essence": 0,
-        "estimatedType": 0,
-        "estimatedValue": 0,
         "exerciseNum": len(exercises),
         "exercises": built,
-        "headPic": "",
-        "id": "0",
-        "idInPlan": "0",
+        "gradeSystemVersion": 0,
+        "hybridTotalSets": 0,
         "name": name,
-        "nickname": "",
-        "originEssence": 0,
         "overview": "",
-        "pbVersion": 2,
-        "pitch": 0,
-        "planIdIndex": 0,
-        "poolLength": 2500,
-        "poolLengthId": 1,
-        "poolLengthUnit": 2,
-        "profile": "",
-        "referExercise": {"intensityType": 1, "hrType": 0, "valueType": 1},
-        "sex": 0,
+        # pool* fields are pool-swim metadata, irrelevant for strength
+        # (sportType=4). The Coros app sets them to 0 on strength workouts.
+        "poolLength": 0,
+        "poolLengthId": 0,
+        "poolLengthUnit": 0,
+        "referExercise": {"gradeSystem": 0, "hrType": 0, "intensityType": 0, "valueType": 1},
         "sets": sets,
-        "shareUrl": "",
-        "simple": False,
-        "sourceId": "425868113867882496",
         "sourceUrl": "",
         "sportType": 4,
-        "star": 0,
         "subType": 65535,
-        "targetType": 0,
-        "targetValue": 0,
-        "thirdPartyId": 0,
         "totalSets": sets,
         "trainingLoad": 0,
         "type": 0,
-        "unit": 0,
-        "userId": "0",
-        "version": 0,
         "videoCoverUrl": "",
         "videoUrl": "",
     }
