@@ -916,20 +916,22 @@ async def create_strength_workout(
             raise ValueError(
                 f"weight_kg must be non-negative, got {weight_kg}"
             )
-        # Coros app mirrors weight into intensityPercent as kg × 1_000_000
-        # (verified by inspecting a workout edited in the official client).
-        # The *Extend fields are part of the schema but unused by the app's UI,
-        # so we always leave them at 0.
+        # intensityValue is the canonical store: always kg × 1000.
+        # The Coros app converts kg → lbs at display time using the user's
+        # account unit setting, so passing kg here is correct for any user.
         # round() (not int()) — int truncates toward zero and some float
         # multiplications land just under the integer (e.g. 27.9 * 1000 →
         # 27899.999...) which would lose the last kg.
-        # NOTE: intensityDisplayUnit is hardcoded to "6" (below) — verified
-        # to display correctly on a kg-configured account. Behaviour on an
-        # account configured for lbs has NOT been tested; the value may be
-        # interpreted as lbs and display the wrong number. Tracked as a
-        # follow-up.
+        # intensityPercent is left at 0: when the Coros client itself creates
+        # a workout it stores the *display* value (kg or lbs) × 1_000_000 in
+        # intensityPercent. Mirroring kg × 1_000_000 from here would therefore
+        # break for accounts configured in lbs. Verified empirically that
+        # intensityPercent=0 displays the correct unit-converted weight on
+        # both kg and lbs accounts — intensityValue alone is sufficient.
+        # The *Extend fields are part of the schema for range-style
+        # prescriptions but the Coros app does not render ranges, so they
+        # are always left at 0.
         intensity_value = round(weight_kg * 1000)
-        intensity_percent = round(weight_kg * 1_000_000)
         total_duration += ((target_value if ex["target_type"] == 2 else 0) + rest) * ex_sets
         built.append({
             "access": 0,
@@ -940,7 +942,7 @@ async def create_strength_workout(
             "intensityCustom": 0,
             "intensityDisplayUnit": "6",
             "intensityMultiplier": 0,
-            "intensityPercent": intensity_percent,
+            "intensityPercent": 0,
             "intensityPercentExtend": 0,
             "intensityType": 1,
             "intensityValue": intensity_value,
